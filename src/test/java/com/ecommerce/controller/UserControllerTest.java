@@ -100,9 +100,14 @@ class UserControllerTest {
     void registerUser_validBody_returns201() throws Exception {
         when(userService.registerUser(any(User.class))).thenReturn(alice);
 
+        // Use raw JSON because @JsonIgnore on password strips it during serialization
+        String body = """
+                {"name":"Alice Johnson","email":"alice@example.com","password":"pass123","address":"123 Main St"}
+                """;
+
         mockMvc.perform(post("/api/users/register")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(alice)))
+                        .content(body))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.id", is(1)))
                 .andExpect(jsonPath("$.name", is("Alice Johnson")));
@@ -146,9 +151,14 @@ class UserControllerTest {
         when(userService.registerUser(any(User.class)))
                 .thenThrow(new BadRequestException("Email already registered: alice@example.com"));
 
+        // Use raw JSON because @JsonIgnore on password strips it during serialization
+        String body = """
+                {"name":"Alice Johnson","email":"alice@example.com","password":"pass123","address":"123 Main St"}
+                """;
+
         mockMvc.perform(post("/api/users/register")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(alice)))
+                        .content(body))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message", containsString("alice@example.com")));
     }
