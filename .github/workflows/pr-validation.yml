@@ -1,0 +1,199 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches: [ "master", "main", "develop" ]
+    types: [ opened, synchronize, reopened, edited ]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+
+  # ──────────────────────────────────────────────
+  # Job 1: Validate PR title follows conventions
+  # ──────────────────────────────────────────────
+  pr-title-check:
+    name: PR Title Convention
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR title format
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          echo "PR Title: $PR_TITLE"
+
+          # Enforce Conventional Commits format:
+          # <type>(optional scope): <description>
+          # Types: feat, fix, docs, style, refactor, test, chore, perf, ci, build, revert
+          PATTERN='^(feat|fix|docs|style|refactor|test|chore|perf|ci|build|revert)(\([a-z0-9 _-]+\))?: .{5,}'
+
+          if echo "$PR_TITLE" | grep -Eq "$PATTERN"; then
+            echo "PR title is valid."
+          else
+            echo ""
+            echo "ERROR: PR title does not follow Conventional Commits format."
+            echo ""
+            echo "Expected format:  <type>(optional-scope): <description>"
+            echo "Minimum length:   description must be at least 5 characters"
+            echo ""
+            echo "Valid types:"
+            echo "  feat     - a new feature"
+            echo "  fix      - a bug fix"
+            echo "  docs     - documentation changes only"
+            echo "  style    - formatting, whitespace (no logic change)"
+            echo "  refactor - code restructure without feature/fix"
+            echo "  test     - adding or updating tests"
+            echo "  chore    - build process or tooling changes"
+            echo "  perf     - performance improvements"
+            echo "  ci       - CI/CD configuration changes"
+            echo "  build    - changes to build system or dependencies"
+            echo "  revert   - reverts a previous commit"
+            echo ""
+            echo "Examples:"
+            echo "  feat(user): add registration endpoint"
+            echo "  fix(order): correct total calculation for discounts"
+            echo "  test: add missing product service tests"
+            echo "  chore: upgrade spring boot to 3.2.4"
+            exit 1
+          fi
+
+  # ──────────────────────────────────────────────
+  # Job 2: Compile and check for build errors
+  # ──────────────────────────────────────────────
+  compile-check:
+    name: Compile Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Compile source and test classes
+        run: mvn compile test-compile --batch-mode -q
+
+  # ──────────────────────────────────────────────
+  # Job 3: Run tests and enforce coverage threshold
+  # ──────────────────────────────────────────────
+  test-and-coverage:
+    name: Tests & Coverage
+    runs-on: ubuntu-latest
+    needs: compile-check
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Run tests with coverage
+        run: mvn verify --batch-mode
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: target/site/jacoco/
+          retention-days: 7
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: target/surefire-reports/
+          retention-days: 7
+
+      - name: Extract and post coverage summary
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          REPORT="target/site/jacoco/index.html"
+          if [ ! -f "$REPORT" ]; then
+            echo "Coverage report not found — tests may have failed before reporting."
+            exit 0
+          fi
+
+          # Parse missed/total instruction counts from the JaCoCo HTML summary
+          MISSED=$(grep -oP 'Total[^<]*<td[^>]*>\K[0-9,]+' "$REPORT" | head -1 | tr -d ',')
+          TOTAL=$(grep -oP 'Total[^<]*<td[^>]*>[0-9,]+</td>[^<]*<td[^>]*>\K[0-9,]+' "$REPORT" | head -1 | tr -d ',')
+
+          if [ -n "$MISSED" ] && [ -n "$TOTAL" ] && [ "$TOTAL" -gt 0 ]; then
+            COVERED=$(( TOTAL - MISSED ))
+            PCT=$(awk "BEGIN { printf \"%.1f\", ($COVERED / $TOTAL) * 100 }")
+          else
+            PCT="N/A"
+          fi
+
+          # Count test results
+          TESTS_RUN=$(grep -rh 'tests run' target/surefire-reports/*.txt 2>/dev/null \
+            | awk -F',' '{sum += $1} END {print sum+0}' || echo "N/A")
+
+          FAILURES=$(grep -rh 'tests run' target/surefire-reports/*.txt 2>/dev/null \
+            | grep -oP 'Failures: \K[0-9]+' | awk '{sum += $1} END {print sum+0}' || echo "0")
+
+          ERRORS=$(grep -rh 'tests run' target/surefire-reports/*.txt 2>/dev/null \
+            | grep -oP 'Errors: \K[0-9]+' | awk '{sum += $1} END {print sum+0}' || echo "0")
+
+          STATUS_ICON="✅"
+          if [ "$FAILURES" != "0" ] || [ "$ERRORS" != "0" ]; then
+            STATUS_ICON="❌"
+          fi
+
+          BODY="${STATUS_ICON} **Test & Coverage Report**
+
+          | Metric | Value |
+          |--------|-------|
+          | Tests run | \`${TESTS_RUN}\` |
+          | Failures | \`${FAILURES}\` |
+          | Errors | \`${ERRORS}\` |
+          | Line coverage | \`${PCT}%\` |
+          | Threshold | \`70%\` |
+
+          > Coverage report artifact uploaded — download from the Actions run summary."
+
+          gh pr comment "$PR_NUMBER" --body "$BODY" \
+            --repo "${{ github.repository }}" || true
+
+  # ──────────────────────────────────────────────
+  # Job 4: Verify the JAR builds cleanly
+  # ──────────────────────────────────────────────
+  build-check:
+    name: Build Verification
+    runs-on: ubuntu-latest
+    needs: test-and-coverage
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build JAR
+        run: mvn package -DskipTests --batch-mode -q
+
+      - name: Confirm JAR was produced
+        run: |
+          JAR=$(ls target/ecommerce-app-*.jar 2>/dev/null | head -1)
+          if [ -z "$JAR" ]; then
+            echo "ERROR: No JAR found in target/."
+            exit 1
+          fi
+          echo "JAR produced: $JAR ($(du -sh "$JAR" | cut -f1))"
