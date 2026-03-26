@@ -24,3 +24,33 @@ spring:
 
 server:
   port: 8080
+
+---
+# Profile: dev (port 8080)
+spring:
+  config:
+    activate:
+      on-profile: dev
+
+server:
+  port: 8080
+
+---
+# Profile: staging (port 9090)
+spring:
+  config:
+    activate:
+      on-profile: staging
+
+server:
+  port: 9090
+
+---
+# Profile: prod (port 7070)
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+server:
+  port: 7070
